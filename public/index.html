@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IND Region Like API Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col justify-between font-sans">
+    
+    <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur sticky top-0 z-50">
+        <div class="max-w-4xl mx-auto px-6 py-4 flex justify-between items-center">
+            <h1 class="text-lg font-bold text-blue-400">⚡ IND Like API Control Panel</h1>
+            <span class="px-3 py-1 text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-full">Online</span>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-6 py-10 w-full grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <h2 class="text-md font-semibold mb-4 text-slate-200">API Request Form</h2>
+            <form id="controlForm" class="space-y-4">
+                <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1">Target UID</label>
+                    <input type="text" id="uidInput" required placeholder="Enter UID..." 
+                        class="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-blue-500">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1">Session Key</label>
+                    <input type="text" id="keyInput" value="FREE20" 
+                        class="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-blue-500">
+                </div>
+                <button type="submit" id="submitBtn"
+                    class="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-2.5 rounded-lg transition">
+                    Send Request
+                </button>
+            </form>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col">
+            <h2 class="text-md font-semibold mb-4 text-slate-200">Terminal Log</h2>
+            <div id="terminalOutput" class="flex-1 bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs text-emerald-400 h-48 overflow-y-auto space-y-2">
+                <p class="text-slate-500">[System]: Waiting for trigger...</p>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const form = document.getElementById('controlForm');
+        const terminal = document.getElementById('terminalOutput');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const uid = document.getElementById('uidInput').value;
+            const key = document.getElementById('keyInput').value;
+            const btn = document.getElementById('submitBtn');
+
+            btn.disabled = true;
+            btn.textContent = 'Processing...';
+
+            try {
+                const response = await fetch('/api/index', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uid, key })
+                });
+
+                const result = await response.json();
+                const p = document.createElement('p');
+                p.textContent = `[Response]: ${JSON.stringify(result)}`;
+                terminal.appendChild(p);
+            } catch (err) {
+                const p = document.createElement('p');
+                p.className = 'text-rose-400';
+                p.textContent = `[Error]: ${err.message}`;
+                terminal.appendChild(p);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Send Request';
+            }
+        });
+    </script>
+</body>
+</html>
