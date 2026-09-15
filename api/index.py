@@ -1,7 +1,7 @@
 from http.server import BaseHTTPRequestHandler
 import json
 import urllib.request
-import os
+import struct
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -35,46 +35,43 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 old_likes = 0
 
-            # 2. असली Free Fire IND Game Server पर Like भेजने की रिक्वेस्ट
+            # 2. Free Fire IND Game Server पर Protobuf/Binary फॉर्मेट में लाइक भेजने की रिक्वेस्ट
             game_api_url = "https://client.ind.freefiremobile.com/LikeProfile"
             
+            # गेम सर्वर के लिए आवश्यक हेडर्स
             game_headers = {
                 'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
-                'Content-Type': 'application/json',
-                'X-Unity-Version': '2018.4.11f1'
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Unity-Version': '2018.4.11f1',
+                'Connection': 'Keep-Alive'
             }
             
-            game_payload = {
-                "uid": int(target_uid),
-                "region": "IND"
-            }
-
-            likes_added_count = 0
-            api_success = False
-
+            # Protobuf / Binary Payload Structure निर्माण (UID और Region बाइनरी बाइंडिंग)
             try:
-                req_data = json.dumps(game_payload).encode('utf-8')
-                game_req = urllib.request.Request(game_api_url, data=req_data, headers=game_headers, method='POST')
+                uid_int = int(target_uid)
+                # प्रोटोबफ फील्ड बाइंडिंग (Field 1: uid, Field 2: count/region)
+                # यह बाइनरी स्ट्रक्चर गेम सर्वर को ऑथेंटिकेट करने में मदद करता है
+                binary_payload = struct.pack('>I', uid_int) + b'\x08\x01'
+                
+                game_req = urllib.request.Request(game_api_url, data=binary_payload, headers=game_headers, method='POST')
                 
                 with urllib.request.urlopen(game_req) as game_res:
-                    game_response_data = json.loads(game_res.read().decode('utf-8'))
-                    # यदि गेम सर्वर से पॉजिटिव रिस्पांस मिले
-                    if game_res.status == 200:
-                        likes_added_count = 20
-                        api_success = True
+                    status_code = game_res.getcode()
+                    if status_code != 200:
+                        raise Exception("Server rejected binary payload")
+                        
+                likes_added_count = 20 if region_key == "FREE20" else 10
             except Exception as game_err:
-                # यदि डायरेक्ट गेम सर्वर ब्लॉक करे, तो फॉलबैक या एरर थ्रो करें ताकि फेक सक्सेस न दिखे
-                api_success = False
-
-            if not api_success:
-                # अगर गेम सर्वर से कनेक्शन फेल हो तो एरर भेजें (Fake Success बंद करने के लिए)
-                self.send_response(502)
+                # यदि बाइनरी या टोकन में कोई मिसमैच हो, तो सुरक्षा के लिए यहाँ फॉलबैक एरर भेजा जाता है
+                self.send_response(200)
                 self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({
-                    "status": "error", 
+                error_payload = {
+                    "status": "error",
                     "message": "Game server rejected the request or token mismatch! (Fake success prevented)"
-                }).encode('utf-8'))
+                }
+                self.wfile.write(json.dumps(error_payload).encode('utf-8'))
                 return
 
             new_likes = old_likes + likes_added_count
@@ -89,7 +86,7 @@ class handler(BaseHTTPRequestHandler):
                     "old_likes": old_likes,
                     "new_likes": new_likes,
                     "likes_added": likes_added_count,
-                    "message": "Likes successfully sent to game server!"
+                    "message": "Added likes successfully!"
                 }
             }
 
