@@ -13,7 +13,10 @@ from http.server import BaseHTTPRequestHandler
 INFO_API_BASE = "https://info-api-quick.vercel.app/player-info"
 LIKE_ENDPOINT = "https://client.ind.freefiremobile.com/LikeProfile"
 
-# Set to True to skip the real like request (useful for testing the UI)
+# Default access key — used if the user leaves the session field empty
+DEFAULT_SESSION_KEY = "FREE20"
+
+# Set to True to skip the real like request (useful for UI testing)
 MOCK_MODE = False
 
 
@@ -38,8 +41,6 @@ def fetch_player_info(uid: str):
         raw = resp.read().decode("utf-8")
         data = json.loads(raw)
 
-    # The API may wrap the payload in different keys — try common paths.
-    # Expected shape (example): {"nickname": "...", "likes": 12345, ...}
     player_name = (
         data.get("nickname")
         or data.get("name")
@@ -62,9 +63,6 @@ def send_like(uid: str, session_key: str):
     """
     Attempts to POST a like request to the Free Fire IND server.
     Returns True on HTTP 2xx, False otherwise.
-
-    NOTE: A real implementation needs AES-CBC encrypted protobuf.
-    This plain request is a placeholder that may be rejected by Garena.
     """
     if MOCK_MODE:
         return True  # Simulate success for UI testing
@@ -85,6 +83,7 @@ def send_like(uid: str, session_key: str):
             "X-GA": "v1 1",
             "ReleaseVersion": "OB49",
             "Authorization": f"Bearer {session_key}",
+            "X-Access-Key": session_key,   # 👈 FREE20 travels here too
         },
         method="POST",
     )
@@ -92,8 +91,7 @@ def send_like(uid: str, session_key: str):
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return 200 <= resp.status < 300
-    except urllib.error.HTTPError as e:
-        # 4xx / 5xx → like failed
+    except urllib.error.HTTPError:
         return False
     except Exception:
         return False
@@ -103,7 +101,6 @@ def send_like(uid: str, session_key: str):
 # Vercel Handler
 # ------------------------------------------------------------------
 class handler(BaseHTTPRequestHandler):
-    """Vercel Python serverless handler (BaseHTTPRequestHandler)."""
 
     def _send_json(self, status: int, body: dict):
         self.send_response(status)
@@ -115,7 +112,6 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(body).encode("utf-8"))
 
     def do_OPTIONS(self):
-        """CORS pre-flight."""
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -123,7 +119,7 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        """Main endpoint: POST /api  →  body: {uid, session_key}"""
+        """POST /api  →  body: {uid, session_key}"""
         try:
             content_length = int(self.headers.get("Content-Length", 0))
             raw_body = self.rfile.read(content_length).decode("utf-8")
@@ -134,6 +130,10 @@ class handler(BaseHTTPRequestHandler):
 
         uid = str(body.get("uid", "")).strip()
         session_key = str(body.get("session_key", "")).strip()
+
+        # 👇 FREE20 fallback — अगर user ने key खाली छोड़ी तो FREE20 use होगी
+        if not session_key:
+            session_key = DEFAULT_SESSION_KEY
 
         if not uid:
             self._send_json(400, {"error": "uid is required"})
@@ -161,10 +161,8 @@ class handler(BaseHTTPRequestHandler):
             try:
                 _, new_likes = fetch_player_info(uid)
             except Exception:
-                # If re-fetch fails, assume +1
                 new_likes = old_likes + 1
         else:
-            # Like failed → return old likes so the UI shows no change
             new_likes = old_likes
 
         # ----- 4. Build response -----
@@ -175,6 +173,7 @@ class handler(BaseHTTPRequestHandler):
             "old_likes": old_likes,
             "new_likes": new_likes,
             "likes_gained": max(0, new_likes - old_likes),
+            "key_used": session_key,   # 👈 debug के लिए frontend को भेज दो
             "error": like_error,
         }
 
