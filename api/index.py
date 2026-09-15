@@ -1,110 +1,181 @@
-from http.server import BaseHTTPRequestHandler
+# api/index.py
+# Vercel Python Serverless Function for Free Fire IND Auto-Like Panel
+
 import json
 import urllib.request
-import struct
+import urllib.error
+import urllib.parse
+from http.server import BaseHTTPRequestHandler
 
+# ------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------
+INFO_API_BASE = "https://info-api-quick.vercel.app/player-info"
+LIKE_ENDPOINT = "https://client.ind.freefiremobile.com/LikeProfile"
+
+# Set to True to skip the real like request (useful for testing the UI)
+MOCK_MODE = False
+
+
+# ------------------------------------------------------------------
+# Helper: Fetch player info (name + current likes)
+# ------------------------------------------------------------------
+def fetch_player_info(uid: str):
+    """
+    Calls the info-api-quick service and returns (player_name, likes).
+    Raises an exception on failure.
+    """
+    url = f"{INFO_API_BASE}?uid={urllib.parse.quote(uid)}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (FF-Auto-Liker/1.0)",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+
+    # The API may wrap the payload in different keys — try common paths.
+    # Expected shape (example): {"nickname": "...", "likes": 12345, ...}
+    player_name = (
+        data.get("nickname")
+        or data.get("name")
+        or data.get("player_name")
+        or "Unknown"
+    )
+    likes = (
+        data.get("likes")
+        or data.get("Like")
+        or data.get("like_count")
+        or 0
+    )
+    return str(player_name), int(likes)
+
+
+# ------------------------------------------------------------------
+# Helper: Send a like to the IND LikeProfile endpoint (best effort)
+# ------------------------------------------------------------------
+def send_like(uid: str, session_key: str):
+    """
+    Attempts to POST a like request to the Free Fire IND server.
+    Returns True on HTTP 2xx, False otherwise.
+
+    NOTE: A real implementation needs AES-CBC encrypted protobuf.
+    This plain request is a placeholder that may be rejected by Garena.
+    """
+    if MOCK_MODE:
+        return True  # Simulate success for UI testing
+
+    payload = json.dumps({
+        "target_uid": uid,
+        "region": "IND",
+        "session_key": session_key,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        LIKE_ENDPOINT,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 6)",
+            "X-Unity-Version": "2018.4.11f1",
+            "X-GA": "v1 1",
+            "ReleaseVersion": "OB49",
+            "Authorization": f"Bearer {session_key}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as e:
+        # 4xx / 5xx → like failed
+        return False
+    except Exception:
+        return False
+
+
+# ------------------------------------------------------------------
+# Vercel Handler
+# ------------------------------------------------------------------
 class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
-            data = json.loads(body.decode('utf-8'))
-            
-            target_uid = data.get('uid')
-            region_key = data.get('key', 'FREE20')
-            
-            if not target_uid:
-                self.send_response(400)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "error", "message": "UID is required"}).encode('utf-8'))
-                return
+    """Vercel Python serverless handler (BaseHTTPRequestHandler)."""
 
-            # 1. पहले Player Info API से पुराने लाइक्स और नाम फेच करें
-            info_url = f"https://info-api-quick.vercel.app/player-info?uid={target_uid}"
-            old_likes = 0
-            player_name = "Unknown"
-            
-            try:
-                req = urllib.request.Request(info_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as response:
-                    info_data = json.loads(response.read().decode('utf-8'))
-                    account_info = info_data.get('basic_info', info_data.get('account_info', {}))
-                    old_likes = int(account_info.get('liked', info_data.get('liked', 0)))
-                    player_name = account_info.get('nickname', info_data.get('nickname', 'Player'))
-            except Exception as e:
-                old_likes = 0
-
-            # 2. Free Fire IND Game Server पर Protobuf/Binary फॉर्मेट में लाइक भेजने की रिक्वेस्ट
-            game_api_url = "https://client.ind.freefiremobile.com/LikeProfile"
-            
-            # गेम सर्वर के लिए आवश्यक हेडर्स
-            game_headers = {
-                'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'X-Unity-Version': '2018.4.11f1',
-                'Connection': 'Keep-Alive'
-            }
-            
-            # Protobuf / Binary Payload Structure निर्माण (UID और Region बाइनरी बाइंडिंग)
-            try:
-                uid_int = int(target_uid)
-                # प्रोटोबफ फील्ड बाइंडिंग (Field 1: uid, Field 2: count/region)
-                # यह बाइनरी स्ट्रक्चर गेम सर्वर को ऑथेंटिकेट करने में मदद करता है
-                binary_payload = struct.pack('>I', uid_int) + b'\x08\x01'
-                
-                game_req = urllib.request.Request(game_api_url, data=binary_payload, headers=game_headers, method='POST')
-                
-                with urllib.request.urlopen(game_req) as game_res:
-                    status_code = game_res.getcode()
-                    if status_code != 200:
-                        raise Exception("Server rejected binary payload")
-                        
-                likes_added_count = 20 if region_key == "FREE20" else 10
-            except Exception as game_err:
-                # यदि बाइनरी या टोकन में कोई मिसमैच हो, तो सुरक्षा के लिए यहाँ फॉलबैक एरर भेजा जाता है
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                error_payload = {
-                    "status": "error",
-                    "message": "Game server rejected the request or token mismatch! (Fake success prevented)"
-                }
-                self.wfile.write(json.dumps(error_payload).encode('utf-8'))
-                return
-
-            new_likes = old_likes + likes_added_count
-
-            response_payload = {
-                "status": "success",
-                "code": 200,
-                "data": {
-                    "uid": target_uid,
-                    "nickname": player_name,
-                    "regionKey": region_key,
-                    "old_likes": old_likes,
-                    "new_likes": new_likes,
-                    "likes_added": likes_added_count,
-                    "message": "Added likes successfully!"
-                }
-            }
-
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(response_payload).encode('utf-8'))
-
-        except Exception as e:
-            self.send_response(500)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode('utf-8'))
+    def _send_json(self, status: int, body: dict):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode("utf-8"))
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        """CORS pre-flight."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def do_POST(self):
+        """Main endpoint: POST /api  →  body: {uid, session_key}"""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            raw_body = self.rfile.read(content_length).decode("utf-8")
+            body = json.loads(raw_body) if raw_body else {}
+        except Exception:
+            self._send_json(400, {"error": "Invalid JSON body"})
+            return
+
+        uid = str(body.get("uid", "")).strip()
+        session_key = str(body.get("session_key", "")).strip()
+
+        if not uid:
+            self._send_json(400, {"error": "uid is required"})
+            return
+
+        # ----- 1. Fetch old likes & player name -----
+        try:
+            player_name, old_likes = fetch_player_info(uid)
+        except Exception as e:
+            self._send_json(502, {
+                "error": f"Failed to fetch player info: {str(e)}"
+            })
+            return
+
+        # ----- 2. Attempt to send the like -----
+        like_sent = False
+        like_error = None
+        try:
+            like_sent = send_like(uid, session_key)
+        except Exception as e:
+            like_error = str(e)
+
+        # ----- 3. Re-fetch likes (or simulate +1) -----
+        if like_sent:
+            try:
+                _, new_likes = fetch_player_info(uid)
+            except Exception:
+                # If re-fetch fails, assume +1
+                new_likes = old_likes + 1
+        else:
+            # Like failed → return old likes so the UI shows no change
+            new_likes = old_likes
+
+        # ----- 4. Build response -----
+        response = {
+            "success": like_sent,
+            "player_name": player_name,
+            "uid": uid,
+            "old_likes": old_likes,
+            "new_likes": new_likes,
+            "likes_gained": max(0, new_likes - old_likes),
+            "error": like_error,
+        }
+
+        self._send_json(200, response)
