@@ -31,15 +31,15 @@
                 </div>
                 <button type="submit" id="submitBtn"
                     class="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-2.5 rounded-lg transition">
-                    Send Request
+                    Send Request & Check Likes
                 </button>
             </form>
         </div>
 
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col">
             <h2 class="text-md font-semibold mb-4 text-slate-200">Terminal Log</h2>
-            <div id="terminalOutput" class="flex-1 bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs text-emerald-400 h-48 overflow-y-auto space-y-2">
-                <p class="text-slate-500">[System]: Waiting for trigger...</p>
+            <div id="terminalOutput" class="flex-1 bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs text-emerald-400 h-64 overflow-y-auto space-y-2">
+                <p class="text-slate-500">[System]: Ready for dispatch...</p>
             </div>
         </div>
     </main>
@@ -48,6 +48,14 @@
         const form = document.getElementById('controlForm');
         const terminal = document.getElementById('terminalOutput');
 
+        function appendLog(text, colorClass = 'text-emerald-400') {
+            const p = document.createElement('p');
+            p.className = colorClass;
+            p.textContent = text;
+            terminal.appendChild(p);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const uid = document.getElementById('uidInput').value;
@@ -55,7 +63,8 @@
             const btn = document.getElementById('submitBtn');
 
             btn.disabled = true;
-            btn.textContent = 'Processing...';
+            btn.textContent = 'Processing & Fetching Info...';
+            appendLog(`[Info]: Fetching details and sending likes for UID: ${uid}...`, 'text-yellow-400');
 
             try {
                 const response = await fetch('/api/index', {
@@ -64,18 +73,29 @@
                     body: JSON.stringify({ uid, key })
                 });
 
-                const result = await response.json();
-                const p = document.createElement('p');
-                p.textContent = `[Response]: ${JSON.stringify(result)}`;
-                terminal.appendChild(p);
+                const rawText = await response.text();
+                let result;
+                try {
+                    result = JSON.parse(rawText);
+                } catch (jsonErr) {
+                    throw new Error(`Invalid JSON response: ${rawText.substring(0, 100)}...`);
+                }
+
+                if (response.ok && result.status === 'success') {
+                    const d = result.data;
+                    appendLog(`--- PLAYER TELEMETRY ---`, 'text-cyan-400');
+                    appendLog(`[Player Name]: ${d.nickname}`);
+                    appendLog(`[Old Likes]: ${d.old_likes}`, 'text-yellow-400');
+                    appendLog(`[New Likes]: ${d.new_likes}`, 'text-emerald-400');
+                    appendLog(`[Success]: Added likes successfully!`, 'text-emerald-300');
+                } else {
+                    appendLog(`[Error]: ${result.message || 'Unknown error'}`, 'text-rose-400');
+                }
             } catch (err) {
-                const p = document.createElement('p');
-                p.className = 'text-rose-400';
-                p.textContent = `[Error]: ${err.message}`;
-                terminal.appendChild(p);
+                appendLog(`[Exception]: ${err.message}`, 'text-rose-400');
             } finally {
                 btn.disabled = false;
-                btn.textContent = 'Send Request';
+                btn.textContent = 'Send Request & Check Likes';
             }
         });
     </script>
