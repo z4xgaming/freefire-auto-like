@@ -26,19 +26,17 @@ app.logger.setLevel(logging.INFO)
 
 # ================= Token auto-refresh configuration =================
 ACCOUNTS_FILE = "accounts.txt"
-TOKEN_FILE_BD = "token_ind.json"  #ad your server jus change ind to bd and t 1server can ad auto jwt
+TOKEN_FILE_BD = "token_ind.json"
 TOKEN_REFRESH_INTERVAL_HOURS = 2
 TOKEN_API_URL = "https://silent-jwt-ob54-api.vercel.app/token"
 
-# Concurrency / batching settings
-MAX_CONCURRENT_REQUESTS = 5      # never more than 5 simultaneous token fetches
-BATCH_SIZE = 10                  # process up to 10 accounts per batch
-REQUEST_TIMEOUT = 10             # seconds (reduced from 30)
-RETRY_COUNT = 2                  # retries on failure
-RETRY_DELAY = 0.5                # seconds between retries
+MAX_CONCURRENT_REQUESTS = 5
+BATCH_SIZE = 10
+REQUEST_TIMEOUT = 10
+RETRY_COUNT = 2
+RETRY_DELAY = 0.5
 
 def load_accounts_from_file():
-    """Read uid:password pairs from accounts.txt."""
     accounts = []
     try:
         if not os.path.exists(ACCOUNTS_FILE):
@@ -50,66 +48,48 @@ def load_accounts_from_file():
                 if not line or line.startswith("#"):
                     continue
                 if ":" not in line:
-                    app.logger.warning(f"Line {line_num}: Invalid format (expected uid:password). Skipping.")
+                    app.logger.warning(f"Line {line_num}: Invalid format. Skipping.")
                     continue
                 uid, password = line.split(":", 1)
                 accounts.append({"uid": uid.strip(), "password": password.strip()})
-        app.logger.info(f"Loaded {len(accounts)} accounts from {ACCOUNTS_FILE}.")
+        app.logger.info(f"Loaded {len(accounts)} accounts.")
     except Exception as e:
         app.logger.error(f"Error loading accounts file: {e}")
     return accounts
 
 async def fetch_token_async(session, uid, password, semaphore):
-    """
-    Async token fetch with retries, semaphore, and dynamic success/failure handling.
-    Returns dict with uid, token, region or None.
-    """
-    # Use the semaphore to limit overall concurrency
     async with semaphore:
-        for attempt in range(1 + RETRY_COUNT):  # original + retries
+        for attempt in range(1 + RETRY_COUNT):
             try:
                 params = {"uid": uid, "password": password}
                 async with session.get(TOKEN_API_URL, params=params,
                                        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
-                    app.logger.debug(f"API response for UID {uid}: {data}")
-
                     token = None
-                    region = "BD"
-
-                    # Extract token – supports multiple response formats
+                    region = "IND"
                     if "token" in data and data["token"]:
                         token = data["token"]
                     elif "oauth_award" in data and isinstance(data["oauth_award"], dict):
                         token = data["oauth_award"].get("access_token")
                     elif "access_token" in data:
                         token = data["access_token"]
-
                     if not token:
-                        app.logger.error(f"Token not found for UID {uid}. Response: {data}")
                         if attempt < RETRY_COUNT:
                             await asyncio.sleep(RETRY_DELAY)
                             continue
                         return None
-
-                    # Extract region
                     if "region" in data and data["region"]:
                         region = data["region"]
                     elif "oauth_award" in data and isinstance(data["oauth_award"], dict):
                         region = data["oauth_award"].get("region", region)
-
-                    # Success: we'll signal it back to the caller for dynamic batching delay
                     return {"uid": str(uid), "token": token, "region": region}
-
             except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
-                app.logger.error(f"Attempt {attempt+1}/{1+RETRY_COUNT} failed for UID {uid}: {e}")
                 if attempt < RETRY_COUNT:
                     await asyncio.sleep(RETRY_DELAY)
                 else:
                     return None
             except Exception as e:
-                app.logger.error(f"Unexpected error for UID {uid}: {e}")
                 if attempt < RETRY_COUNT:
                     await asyncio.sleep(RETRY_DELAY)
                 else:
@@ -117,7 +97,6 @@ async def fetch_token_async(session, uid, password, semaphore):
         return None
 
 def update_token_json(new_accounts_data):
-    """Update token_bd.json, merging with existing data. (unchanged)"""
     try:
         existing_data = []
         if os.path.exists(TOKEN_FILE_BD):
@@ -132,104 +111,57 @@ def update_token_json(new_accounts_data):
         for new_item in new_accounts_data:
             uid_to_existing[new_item["uid"]] = new_item
         merged_data = list(uid_to_existing.values())
-
         if os.path.exists(TOKEN_FILE_BD):
             backup_file = f"{TOKEN_FILE_BD}.backup"
             try:
                 os.rename(TOKEN_FILE_BD, backup_file)
-                app.logger.info(f"Backup created: {backup_file}")
             except Exception as e:
-                app.logger.warning(f"Failed to create backup: {e}")
-
+                app.logger.warning(f"Backup failed: {e}")
         with open(TOKEN_FILE_BD, "w") as f:
             json.dump(merged_data, f, indent=2)
-        app.logger.info(f"{TOKEN_FILE_BD} updated with {len(merged_data)} entries.")
         return True
     except Exception as e:
         app.logger.error(f"Failed to update token file: {e}")
         return False
 
 async def refresh_all_tokens_async():
-    """
-    Async token refresh: fetches tokens in batches with limited concurrency,
-    dynamic delays, retries, and connection reuse.
-    """
-    app.logger.info("Starting async token refresh process...")
     accounts = load_accounts_from_file()
     if not accounts:
-        app.logger.warning("No accounts found. Token refresh aborted.")
         return
-
     successful = []
     failed_count = 0
-
-    # Use a single aiohttp session for all requests (connection reuse)
     async with aiohttp.ClientSession() as session:
-        # Semaphore to enforce max concurrent requests
         sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-
-        # Process in batches
         for batch_start in range(0, len(accounts), BATCH_SIZE):
             batch = accounts[batch_start:batch_start + BATCH_SIZE]
-            app.logger.info(f"Processing batch {batch_start//BATCH_SIZE + 1} "
-                            f"({len(batch)} accounts)")
-
-            # Create tasks for this batch
-            tasks = [fetch_token_async(session, acc["uid"], acc["password"], sem)
-                     for acc in batch]
+            tasks = [fetch_token_async(session, acc["uid"], acc["password"], sem) for acc in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            batch_success = 0
             batch_failure = 0
-
             for acc, res in zip(batch, results):
-                uid = acc["uid"]
-                if isinstance(res, Exception):
-                    app.logger.error(f"Unexpected exception for UID {uid}: {res}")
-                    batch_failure += 1
-                    failed_count += 1
-                elif res is None:
-                    app.logger.error(f"Failed to fetch token for UID {uid}")
+                if isinstance(res, Exception) or res is None:
                     batch_failure += 1
                     failed_count += 1
                 else:
                     successful.append(res)
-                    batch_success += 1
-                    app.logger.info(f"Success UID {uid} -> region {res['region']}")
-
-            # Dynamic delay between batches based on the batch outcome
             if batch_failure > 0:
-                app.logger.info(f"Batch had failures – waiting 1.0s before next batch")
                 await asyncio.sleep(1.0)
             else:
-                app.logger.info(f"Batch fully successful – waiting 0.2s before next batch")
                 await asyncio.sleep(0.2)
-
-    # Write collected tokens to file
     if successful:
         update_token_json(successful)
-        app.logger.info(f"Refresh complete. Success: {len(successful)}, Failed: {failed_count}")
-    else:
-        app.logger.error("No tokens were successfully fetched. File not updated.")
 
 def scheduled_token_refresh():
-    """Background scheduler loop – runs async token refresh on a dedicated event loop."""
     while True:
-        next_run = datetime.now() + timedelta(hours=TOKEN_REFRESH_INTERVAL_HOURS)
-        app.logger.info(f"Next token refresh scheduled at: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
         asyncio.run(refresh_all_tokens_async())
         time.sleep(TOKEN_REFRESH_INTERVAL_HOURS * 3600)
 
 def start_background_scheduler():
-    """Start the scheduler thread."""
     scheduler_thread = threading.Thread(target=scheduled_token_refresh, daemon=True)
     scheduler_thread.start()
-    app.logger.info("Token refresh scheduler started in background.")
 
-# ================= Helper functions (unchanged) =================
+# ================= Helper functions =================
 
 def load_tokens(server_name):
-    """Load tokens based on server region."""
     try:
         if server_name == "IND":
             with open("token_ind.json", "r") as f:
@@ -242,11 +174,10 @@ def load_tokens(server_name):
                 tokens = json.load(f)
         return tokens
     except Exception as e:
-        app.logger.error(f"Token load failed: {server_name}. Error: {e}") 
+        app.logger.error(f"Token load failed: {server_name}. Error: {e}")
         return None
 
 def encrypt_message(plaintext):
-    """AES-CBC encryption."""
     try:
         key = b'Yg&tc%DEuh6%Zc^8'
         iv = b'6oyZDr22E3ychjM%'
@@ -259,7 +190,6 @@ def encrypt_message(plaintext):
         return None
 
 def create_protobuf_message(user_id, region):
-    """Create like protobuf."""
     try:
         message = like_pb2.like()
         message.uid = int(user_id)
@@ -270,7 +200,6 @@ def create_protobuf_message(user_id, region):
         return None
 
 async def send_request(encrypted_uid, token, url):
-    """Async POST request."""
     try:
         edata = bytes.fromhex(encrypted_uid)
         headers = {
@@ -282,12 +211,11 @@ async def send_request(encrypted_uid, token, url):
             'Expect': "100-continue",
             'X-Unity-Version': "2018.4.11f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB54"
+            'ReleaseVersion': "OB55"
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
                 if response.status != 200:
-                    app.logger.error(f"Request failed: Status {response.status}") 
                     return response.status
                 return await response.text()
     except Exception as e:
@@ -295,20 +223,16 @@ async def send_request(encrypted_uid, token, url):
         return None
 
 async def send_multiple_requests(uid, server_name, url):
-    """Send 120 concurrent like requests."""
     try:
         region = server_name
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
-            app.logger.error("Like protobuf failed.")
             return None
         encrypted_uid = encrypt_message(protobuf_message)
         if encrypted_uid is None:
-            app.logger.error("Like encryption failed.")
             return None
         tokens = load_tokens(server_name)
         if tokens is None:
-            app.logger.error("Token load failed in multi-send.")
             return None
         tasks = []
         for i in range(120):
@@ -321,7 +245,6 @@ async def send_multiple_requests(uid, server_name, url):
         return None
 
 def create_protobuf(uid):
-    """Create UID generator protobuf."""
     try:
         message = uid_generator_pb2.uid_generator()
         message.saturn_ = int(uid)
@@ -332,14 +255,12 @@ def create_protobuf(uid):
         return None
 
 def enc(uid):
-    """Encrypt UID protobuf."""
     protobuf_data = create_protobuf(uid)
     if protobuf_data is None:
         return None
     return encrypt_message(protobuf_data)
 
 def make_request(encrypt, server_name, token):
-    """Get player info (before/after likes)."""
     try:
         if server_name == "IND":
             base_url = "https://client.ind.freefiremobile.com"
@@ -347,7 +268,6 @@ def make_request(encrypt, server_name, token):
             base_url = "https://client.us.freefiremobile.com"
         else:
             base_url = "https://clientbp.ggpolarbear.com"
-        
         url = f"{base_url}/GetPlayerPersonalShow"
         edata = bytes.fromhex(encrypt)
         headers = {
@@ -359,21 +279,18 @@ def make_request(encrypt, server_name, token):
             'Expect': "100-continue",
             'X-Unity-Version': "2018.4.11f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB54"
+            'ReleaseVersion': "OB55"
         }
         response = requests.post(url, data=edata, headers=headers, verify=False, timeout=30)
         hex_data = response.content.hex()
         binary = bytes.fromhex(hex_data)
         decode = decode_protobuf(binary)
-        if decode is None:
-            app.logger.error("Protobuf decode failed in make_request.")
         return decode
     except Exception as e:
         app.logger.error(f"make_request exception: {e}")
         return None
 
 def decode_protobuf(binary):
-    """Decode like count protobuf."""
     try:
         items = like_count_pb2.Info()
         items.ParseFromString(binary)
@@ -407,17 +324,13 @@ def handle_requests():
             before = make_request(encrypted_uid, server_name, token)
             if before is None:
                 raise Exception("Failed to retrieve initial player info.")
-            try:
-                jsone = MessageToJson(before)
-            except Exception as e:
-                raise Exception(f"'before' proto to JSON failed: {e}")
+            jsone = MessageToJson(before)
             data_before = json.loads(jsone)
             before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
             try:
                 before_like = int(before_like)
             except Exception:
                 before_like = 0
-            app.logger.info(f"Initial likes for UID {uid}: {before_like}")
 
             if server_name == "IND":
                 like_url = "https://client.ind.freefiremobile.com/LikeProfile"
@@ -431,10 +344,7 @@ def handle_requests():
             after = make_request(encrypted_uid, server_name, token)
             if after is None:
                 raise Exception("Failed to retrieve player info after like requests.")
-            try:
-                jsone_after = MessageToJson(after)
-            except Exception as e:
-                raise Exception(f"'after' proto to JSON failed: {e}")
+            jsone_after = MessageToJson(after)
             data_after = json.loads(jsone_after)
             after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
             player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
@@ -457,7 +367,6 @@ def handle_requests():
         app.logger.error(f"Main request processing failed: {e}")
         return jsonify({"error": str(e)}), 500
 
-# ================= Start server =================
 if __name__ == "__main__":
     start_background_scheduler()
     port = int(os.environ.get("PORT", 5000))
