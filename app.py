@@ -19,6 +19,13 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+# Fix for asyncio.run() inside Flask route (Vercel/Render)
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
+
 warnings.simplefilter('ignore', InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -26,7 +33,7 @@ app.logger.setLevel(logging.INFO)
 
 # ================= Token auto-refresh configuration =================
 ACCOUNTS_FILE = "accounts.txt"
-TOKEN_FILE_BD = "token_ind.json"
+TOKEN_FILE_IND = "token_ind.json"
 TOKEN_REFRESH_INTERVAL_HOURS = 2
 TOKEN_API_URL = "https://silent-jwt-ob54-api.vercel.app/token"
 
@@ -35,6 +42,7 @@ BATCH_SIZE = 10
 REQUEST_TIMEOUT = 10
 RETRY_COUNT = 2
 RETRY_DELAY = 0.5
+
 
 def load_accounts_from_file():
     accounts = []
@@ -56,6 +64,7 @@ def load_accounts_from_file():
     except Exception as e:
         app.logger.error(f"Error loading accounts file: {e}")
     return accounts
+
 
 async def fetch_token_async(session, uid, password, semaphore):
     async with semaphore:
@@ -84,45 +93,47 @@ async def fetch_token_async(session, uid, password, semaphore):
                     elif "oauth_award" in data and isinstance(data["oauth_award"], dict):
                         region = data["oauth_award"].get("region", region)
                     return {"uid": str(uid), "token": token, "region": region}
-            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError):
                 if attempt < RETRY_COUNT:
                     await asyncio.sleep(RETRY_DELAY)
                 else:
                     return None
-            except Exception as e:
+            except Exception:
                 if attempt < RETRY_COUNT:
                     await asyncio.sleep(RETRY_DELAY)
                 else:
                     return None
         return None
 
+
 def update_token_json(new_accounts_data):
     try:
         existing_data = []
-        if os.path.exists(TOKEN_FILE_BD):
-            with open(TOKEN_FILE_BD, "r") as f:
+        if os.path.exists(TOKEN_FILE_IND):
+            with open(TOKEN_FILE_IND, "r") as f:
                 try:
                     existing_data = json.load(f)
                     if not isinstance(existing_data, list):
                         existing_data = []
                 except json.JSONDecodeError:
                     existing_data = []
-        uid_to_existing = {item["uid"]: item for item in existing_data}
+        uid_to_existing = {item.get("uid", ""): item for item in existing_data if item.get("uid")}
         for new_item in new_accounts_data:
             uid_to_existing[new_item["uid"]] = new_item
         merged_data = list(uid_to_existing.values())
-        if os.path.exists(TOKEN_FILE_BD):
-            backup_file = f"{TOKEN_FILE_BD}.backup"
+        if os.path.exists(TOKEN_FILE_IND):
+            backup_file = f"{TOKEN_FILE_IND}.backup"
             try:
-                os.rename(TOKEN_FILE_BD, backup_file)
+                os.rename(TOKEN_FILE_IND, backup_file)
             except Exception as e:
                 app.logger.warning(f"Backup failed: {e}")
-        with open(TOKEN_FILE_BD, "w") as f:
+        with open(TOKEN_FILE_IND, "w") as f:
             json.dump(merged_data, f, indent=2)
         return True
     except Exception as e:
         app.logger.error(f"Failed to update token file: {e}")
         return False
+
 
 async def refresh_all_tokens_async():
     accounts = load_accounts_from_file()
@@ -150,14 +161,17 @@ async def refresh_all_tokens_async():
     if successful:
         update_token_json(successful)
 
+
 def scheduled_token_refresh():
     while True:
         asyncio.run(refresh_all_tokens_async())
         time.sleep(TOKEN_REFRESH_INTERVAL_HOURS * 3600)
 
+
 def start_background_scheduler():
     scheduler_thread = threading.Thread(target=scheduled_token_refresh, daemon=True)
     scheduler_thread.start()
+
 
 # ================= Helper functions =================
 
@@ -172,10 +186,11 @@ def load_tokens(server_name):
         else:
             with open("token_bd.json", "r") as f:
                 tokens = json.load(f)
-        return tokens
+        return tokens if isinstance(tokens, list) else []
     except Exception as e:
         app.logger.error(f"Token load failed: {server_name}. Error: {e}")
-        return None
+        return []
+
 
 def encrypt_message(plaintext):
     try:
@@ -189,6 +204,7 @@ def encrypt_message(plaintext):
         app.logger.error(f"Encryption failed. Error: {e}")
         return None
 
+
 def create_protobuf_message(user_id, region):
     try:
         message = like_pb2.like()
@@ -199,7 +215,8 @@ def create_protobuf_message(user_id, region):
         app.logger.error(f"Protobuf creation (like) failed. Error: {e}")
         return None
 
-async def send_request(encrypted_uid, token, url):
+
+async def send_request(session, encrypted_uid, token, url):
     try:
         edata = bytes.fromhex(encrypted_uid)
         headers = {
@@ -213,14 +230,14 @@ async def send_request(encrypted_uid, token, url):
             'X-GA': "v1 1",
             'ReleaseVersion': "OB55"
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=edata, headers=headers) as response:
-                if response.status != 200:
-                    return response.status
-                return await response.text()
+        async with session.post(url, data=edata, headers=headers) as response:
+            if response.status != 200:
+                return response.status
+            return await response.text()
     except Exception as e:
         app.logger.error(f"send_request exception: {e}")
         return None
+
 
 async def send_multiple_requests(uid, server_name, url):
     try:
@@ -232,17 +249,20 @@ async def send_multiple_requests(uid, server_name, url):
         if encrypted_uid is None:
             return None
         tokens = load_tokens(server_name)
-        if tokens is None:
+        if not tokens:
+            app.logger.error("No tokens available for likes.")
             return None
         tasks = []
-        for i in range(120):
-            token = tokens[i % len(tokens)]["token"]
-            tasks.append(send_request(encrypted_uid, token, url))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        async with aiohttp.ClientSession() as session:
+            for i in range(120):
+                token = tokens[i % len(tokens)]["token"]
+                tasks.append(send_request(session, encrypted_uid, token, url))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
     except Exception as e:
         app.logger.error(f"send_multiple_requests exception: {e}")
         return None
+
 
 def create_protobuf(uid):
     try:
@@ -254,11 +274,13 @@ def create_protobuf(uid):
         app.logger.error(f"Protobuf creation (uid) failed. Error: {e}")
         return None
 
+
 def enc(uid):
     protobuf_data = create_protobuf(uid)
     if protobuf_data is None:
         return None
     return encrypt_message(protobuf_data)
+
 
 def make_request(encrypt, server_name, token):
     try:
@@ -290,6 +312,7 @@ def make_request(encrypt, server_name, token):
         app.logger.error(f"make_request exception: {e}")
         return None
 
+
 def decode_protobuf(binary):
     try:
         items = like_count_pb2.Info()
@@ -301,6 +324,7 @@ def decode_protobuf(binary):
     except Exception as e:
         app.logger.error(f"Decode failed: {e}")
         return None
+
 
 # ================= Main API endpoint =================
 
@@ -314,16 +338,38 @@ def handle_requests():
     try:
         def process_request():
             tokens = load_tokens(server_name)
-            if tokens is None:
-                raise Exception("Failed to load tokens.")
-            token = tokens[0]['token']
+            if not tokens:
+                raise Exception("Failed to load tokens or token list is empty.")
+
+            # Try multiple tokens for before/after requests
+            valid_token = None
+            for t in tokens:
+                candidate = t.get("token") if isinstance(t, dict) else None
+                if candidate:
+                    valid_token = candidate
+                    break
+
+            if not valid_token:
+                raise Exception("No token found in token_ind.json.")
+
             encrypted_uid = enc(uid)
             if encrypted_uid is None:
                 raise Exception("Encryption of UID failed.")
 
-            before = make_request(encrypted_uid, server_name, token)
+            before = make_request(encrypted_uid, server_name, valid_token)
+            if before is None:
+                # Try next tokens
+                for t in tokens:
+                    candidate = t.get("token") if isinstance(t, dict) else None
+                    if candidate and candidate != valid_token:
+                        before = make_request(encrypted_uid, server_name, candidate)
+                        if before is not None:
+                            valid_token = candidate
+                            break
+
             if before is None:
                 raise Exception("Failed to retrieve initial player info.")
+
             jsone = MessageToJson(before)
             data_before = json.loads(jsone)
             before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
@@ -341,9 +387,10 @@ def handle_requests():
 
             asyncio.run(send_multiple_requests(uid, server_name, like_url))
 
-            after = make_request(encrypted_uid, server_name, token)
+            after = make_request(encrypted_uid, server_name, valid_token)
             if after is None:
                 raise Exception("Failed to retrieve player info after like requests.")
+
             jsone_after = MessageToJson(after)
             data_after = json.loads(jsone_after)
             after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
@@ -366,6 +413,7 @@ def handle_requests():
     except Exception as e:
         app.logger.error(f"Main request processing failed: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     start_background_scheduler()
