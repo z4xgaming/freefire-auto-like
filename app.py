@@ -19,7 +19,6 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-# Fix for asyncio.run() inside Flask route (Vercel/Render)
 try:
     import nest_asyncio
     nest_asyncio.apply()
@@ -43,7 +42,6 @@ REQUEST_TIMEOUT = 10
 RETRY_COUNT = 2
 RETRY_DELAY = 0.5
 
-
 def load_accounts_from_file():
     accounts = []
     try:
@@ -64,7 +62,6 @@ def load_accounts_from_file():
     except Exception as e:
         app.logger.error(f"Error loading accounts file: {e}")
     return accounts
-
 
 async def fetch_token_async(session, uid, password, semaphore):
     async with semaphore:
@@ -105,7 +102,6 @@ async def fetch_token_async(session, uid, password, semaphore):
                     return None
         return None
 
-
 def update_token_json(new_accounts_data):
     try:
         existing_data = []
@@ -134,7 +130,6 @@ def update_token_json(new_accounts_data):
         app.logger.error(f"Failed to update token file: {e}")
         return False
 
-
 async def refresh_all_tokens_async():
     accounts = load_accounts_from_file()
     if not accounts:
@@ -161,17 +156,14 @@ async def refresh_all_tokens_async():
     if successful:
         update_token_json(successful)
 
-
 def scheduled_token_refresh():
     while True:
         asyncio.run(refresh_all_tokens_async())
         time.sleep(TOKEN_REFRESH_INTERVAL_HOURS * 3600)
 
-
 def start_background_scheduler():
     scheduler_thread = threading.Thread(target=scheduled_token_refresh, daemon=True)
     scheduler_thread.start()
-
 
 # ================= Helper functions =================
 
@@ -191,7 +183,6 @@ def load_tokens(server_name):
         app.logger.error(f"Token load failed: {server_name}. Error: {e}")
         return []
 
-
 def encrypt_message(plaintext):
     try:
         key = b'Yg&tc%DEuh6%Zc^8'
@@ -204,7 +195,6 @@ def encrypt_message(plaintext):
         app.logger.error(f"Encryption failed. Error: {e}")
         return None
 
-
 def create_protobuf_message(user_id, region):
     try:
         message = like_pb2.like()
@@ -215,7 +205,6 @@ def create_protobuf_message(user_id, region):
         app.logger.error(f"Protobuf creation (like) failed. Error: {e}")
         return None
 
-
 async def send_request(session, encrypted_uid, token, url):
     try:
         edata = bytes.fromhex(encrypted_uid)
@@ -224,7 +213,7 @@ async def send_request(session, encrypted_uid, token, url):
             'Connection': "Keep-Alive",
             'Accept-Encoding': "gzip",
             'Authorization': f"Bearer {token}",
-            'Content-Type': "application/x-www-form-urlencoded",
+            'Content-Type': "application/octet-stream",
             'Expect': "100-continue",
             'X-Unity-Version': "2018.4.11f1",
             'X-GA': "v1 1",
@@ -237,7 +226,6 @@ async def send_request(session, encrypted_uid, token, url):
     except Exception as e:
         app.logger.error(f"send_request exception: {e}")
         return None
-
 
 async def send_multiple_requests(uid, server_name, url):
     try:
@@ -263,7 +251,6 @@ async def send_multiple_requests(uid, server_name, url):
         app.logger.error(f"send_multiple_requests exception: {e}")
         return None
 
-
 def create_protobuf(uid):
     try:
         message = uid_generator_pb2.uid_generator()
@@ -274,13 +261,11 @@ def create_protobuf(uid):
         app.logger.error(f"Protobuf creation (uid) failed. Error: {e}")
         return None
 
-
 def enc(uid):
     protobuf_data = create_protobuf(uid)
     if protobuf_data is None:
         return None
     return encrypt_message(protobuf_data)
-
 
 def make_request(encrypt, server_name, token):
     try:
@@ -297,7 +282,7 @@ def make_request(encrypt, server_name, token):
             'Connection': "Keep-Alive",
             'Accept-Encoding': "gzip",
             'Authorization': f"Bearer {token}",
-            'Content-Type': "application/x-www-form-urlencoded",
+            'Content-Type': "application/octet-stream",
             'Expect': "100-continue",
             'X-Unity-Version': "2018.4.11f1",
             'X-GA': "v1 1",
@@ -312,7 +297,6 @@ def make_request(encrypt, server_name, token):
         app.logger.error(f"make_request exception: {e}")
         return None
 
-
 def decode_protobuf(binary):
     try:
         items = like_count_pb2.Info()
@@ -324,7 +308,6 @@ def decode_protobuf(binary):
     except Exception as e:
         app.logger.error(f"Decode failed: {e}")
         return None
-
 
 # ================= Main API endpoint =================
 
@@ -341,7 +324,6 @@ def handle_requests():
             if not tokens:
                 raise Exception("Failed to load tokens or token list is empty.")
 
-            # Try multiple tokens for before/after requests
             valid_token = None
             for t in tokens:
                 candidate = t.get("token") if isinstance(t, dict) else None
@@ -358,7 +340,6 @@ def handle_requests():
 
             before = make_request(encrypted_uid, server_name, valid_token)
             if before is None:
-                # Try next tokens
                 for t in tokens:
                     candidate = t.get("token") if isinstance(t, dict) else None
                     if candidate and candidate != valid_token:
@@ -413,7 +394,6 @@ def handle_requests():
     except Exception as e:
         app.logger.error(f"Main request processing failed: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     start_background_scheduler()
